@@ -1,27 +1,22 @@
 import requests
 import argparse
 import sys
+import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from tqdm import tqdm
 
-# --- 默认配置 ---
+# --- 全局默认配置 ---
+DEFAULT_DICT = "dict.txt"  # 默认字典文件名
 DEFAULT_THREADS = 20
 DEFAULT_TIMEOUT = 3
 DEFAULT_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
 
 def scan_path(url_base, path, timeout, headers):
-    """
-    执行单个路径的扫描
-    """
     if not path.startswith("/"):
         path = "/" + path
     url = url_base + path
-
     try:
-        # allow_redirects=False 通常用于目录扫描，防止跳转到统一的错误页
         r = requests.get(url, headers=headers, timeout=timeout, allow_redirects=False)
-        
-        # 简单过滤：只返回非 404 的页面
         if r.status_code != 404:
             return f"[{r.status_code}] {url} - Size: {len(r.content)}"
     except Exception:
@@ -29,43 +24,58 @@ def scan_path(url_base, path, timeout, headers):
     return None
 
 def main():
-    # 1. 设置命令行参数解析
-    parser = argparse.ArgumentParser(description="A simple directory scanner.")
-    
-    # 必需参数
-    parser.add_argument("-u", "--url", help="Target URL (e.g., http://example.com)", required=True)
-    parser.add_argument("-w", "--wordlist", help="Path to dictionary file", required=True)
-    
-    # 可选参数
-    parser.add_argument("-t", "--threads", type=int, default=DEFAULT_THREADS, help=f"Number of threads (default: {DEFAULT_THREADS})")
-    parser.add_argument("-x", "--timeout", type=int, default=DEFAULT_TIMEOUT, help=f"Request timeout in seconds (default: {DEFAULT_TIMEOUT})")
+    # 1. 设置参数解析 (将 required 改为 False)
+    parser = argparse.ArgumentParser(description="A directory scanner.")
+    parser.add_argument("-u", "--url", help="Target URL (e.g., http://example.com)")
+    parser.add_argument("-w", "--wordlist", help="Path to dictionary file")
+    parser.add_argument("-t", "--threads", type=int, default=DEFAULT_THREADS, help=f"Threads (default: {DEFAULT_THREADS})")
+    parser.add_argument("-x", "--timeout", type=int, default=DEFAULT_TIMEOUT, help=f"Timeout (default: {DEFAULT_TIMEOUT})")
     parser.add_argument("-o", "--output", help="Save results to a file")
     parser.add_argument("--ua", default=DEFAULT_UA, help="Custom User-Agent")
 
     args = parser.parse_args()
 
-    # 处理 URL 末尾的斜杠
-    target_url = args.url.rstrip("/")
-    headers = {"User-Agent": args.ua}
+    # 2. 交互式补充缺失参数
+    # 处理 URL
+    target_url = args.url
+    if not target_url:
+        target_url = input("请输入目标 URL (例如 http://example.com): ").strip()
+    
+    if not target_url.startswith("http"):
+        print("[-] 错误: URL 必须以 http:// 或 https:// 开头")
+        sys.exit(1)
+    
+    target_url = target_url.rstrip("/")
 
-    # 2. 读取字典
+    # 处理 字典路径
+    dict_path = args.wordlist
+    if not dict_path:
+        if os.path.exists(DEFAULT_DICT):
+            dict_path = DEFAULT_DICT
+            print(f"[*] 未指定字典，自动使用当前目录下默认字典: {DEFAULT_DICT}")
+        else:
+            dict_path = input("未找到默认字典，请输入字典文件路径: ").strip()
+
+    # 3. 读取并检查字典
     try:
-        with open(args.wordlist, "r", encoding="utf-8") as f:
+        with open(dict_path, "r", encoding="utf-8") as f:
             paths = [line.strip() for line in f if line.strip()]
     except FileNotFoundError:
-        print(f"[-] Error: Dictionary file '{args.wordlist}' not found.")
+        print(f"[-] 错误: 找不到文件 '{dict_path}'")
         sys.exit(1)
 
-    print(f"[*] Starting scan on: {target_url}")
-    print(f"[*] Total paths: {len(paths)} | Threads: {args.threads} | Timeout: {args.timeout}")
-    print("-" * 60)
+    # 4. 开始扫描逻辑
+    print("\n" + "="*60)
+    print(f" 目标: {target_url}")
+    print(f" 字典: {dict_path} ({len(paths)} 行)")
+    print(f" 线程: {args.threads} | 超时: {args.timeout}s")
+    print("="*60 + "\n")
 
     results = []
+    headers = {"User-Agent": args.ua}
 
-    # 3. 使用线程池执行
     try:
         with ThreadPoolExecutor(max_workers=args.threads) as executor:
-            # 提交任务
             futures = {executor.submit(scan_path, target_url, p, args.timeout, headers): p for p in paths}
             
             with tqdm(total=len(paths), desc="Scanning", unit="req", ncols=80) as pbar:
@@ -76,17 +86,16 @@ def main():
                         results.append(result)
                     pbar.update(1)
     except KeyboardInterrupt:
-        print("\n[!] Scan interrupted by user.")
+        print("\n[!] 用户中断扫描。")
 
-    # 4. 结果输出到文件
+    # 5. 结果保存
     if args.output and results:
         with open(args.output, "w", encoding="utf-8") as f:
             for item in results:
                 f.write(item + "\n")
-        print(f"[*] Results saved to: {args.output}")
+        print(f"\n[*] 结果已保存至: {args.output}")
 
-    print("-" * 60)
-    print("[*] Scan completed.")
+    print("\n[*] 扫描完成。")
 
 if __name__ == "__main__":
     main()
