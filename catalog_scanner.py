@@ -2,30 +2,87 @@ import requests
 import argparse
 import sys
 import os
+import uuid
+import hashlib
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from tqdm import tqdm
 
 # --- 全局默认配置 ---
-DEFAULT_DICT = "dict.txt"  # 默认字典文件名
+DEFAULT_DICT = "dict.txt"
 DEFAULT_THREADS = 20
 DEFAULT_TIMEOUT = 3
 DEFAULT_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+
+# 用于存储404页面的特征
+fingerprint = {
+    "status_code": 404,
+    "content_length": -1,
+    "content_hash": "",
+    "is_soft_404": False
+}
+
+def get_content_hash(content):
+    """计算响应内容的MD5，用于精确对比"""
+    return hashlib.md5(content).hexdigest()
+
+def get_404_fingerprint(url_base, headers, timeout):
+    """
+    通过访问一个随机路径来获取该站点的404特征
+    """
+    random_path = "/" + str(uuid.uuid4()) + ".html"
+    url = url_base + random_path
+    try:
+        # 允许重定向，因为很多伪造404会跳转到 /404.html 或 首页
+        r = requests.get(url, headers=headers, timeout=timeout, allow_redirects=True)
+        fingerprint["status_code"] = r.status_code
+        fingerprint["content_length"] = len(r.content)
+        fingerprint["content_hash"] = get_content_hash(r.content)
+        
+        if r.status_code == 200:
+            print(f"[*] 检测到 Soft 404 (伪造404)。特征: 状态码 200, 长度 {len(r.content)}")
+            fingerprint["is_soft_404"] = True
+        else:
+            print(f"[*] 站点使用标准响应码: {r.status_code}")
+            
+    except Exception as e:
+        print(f"[-] 无法获取404特征，将使用默认404过滤: {e}")
 
 def scan_path(url_base, path, timeout, headers):
     if not path.startswith("/"):
         path = "/" + path
     url = url_base + path
     try:
-        r = requests.get(url, headers=headers, timeout=timeout, allow_redirects=False)
-        if r.status_code != 404:
-            return f"[{r.status_code}] {url} - Size: {len(r.content)}"
+        # 扫描时建议跟随重定向，以匹配指纹获取时的逻辑
+        r = requests.get(url, headers=headers, timeout=timeout, allow_redirects=True)
+        
+        # --- 过滤逻辑开始 ---
+        
+        # 1. 物理状态码过滤 (如果指纹是404，且当前也是404，直接过滤)
+        if r.status_code == 404:
+            return None
+            
+        # 2. 特征匹配过滤
+        current_hash = get_content_hash(r.content)
+        current_len = len(r.content)
+        
+        # 如果当前响应与404指纹的长度和哈希一致，判定为404
+        if current_hash == fingerprint["content_hash"]:
+            return None
+        
+        # 有些动态404页面（带时间戳或随机数）长度会微小变化，这里检查长度差值
+        # 如果长度完全一样但内容Hash不同，通常也是404页面（可能包含请求路径）
+        if current_len == fingerprint["content_length"]:
+            return None
+
+        # --- 过滤逻辑结束 ---
+
+        return f"[{r.status_code}] {url} - Size: {current_len}"
     except Exception:
         pass
     return None
 
 def main():
-    # 1. 设置参数解析 (将 required 改为 False)
-    parser = argparse.ArgumentParser(description="A directory scanner.")
+    parser = argparse.ArgumentParser(description="A directory scanner with Soft 404 detection.")
     parser.add_argument("-u", "--url", help="Target URL (e.g., http://example.com)")
     parser.add_argument("-w", "--wordlist", help="Path to dictionary file")
     parser.add_argument("-t", "--threads", type=int, default=DEFAULT_THREADS, help=f"Threads (default: {DEFAULT_THREADS})")
@@ -35,8 +92,6 @@ def main():
 
     args = parser.parse_args()
 
-    # 2. 交互式补充缺失参数
-    # 处理 URL
     target_url = args.url
     if not target_url:
         target_url = input("请输入目标 URL (例如 http://example.com): ").strip()
@@ -47,7 +102,6 @@ def main():
     
     target_url = target_url.rstrip("/")
 
-    # 处理 字典路径
     dict_path = args.wordlist
     if not dict_path:
         if os.path.exists(DEFAULT_DICT):
@@ -56,7 +110,6 @@ def main():
         else:
             dict_path = input("未找到默认字典，请输入字典文件路径: ").strip()
 
-    # 3. 读取并检查字典
     try:
         with open(dict_path, "r", encoding="utf-8") as f:
             paths = [line.strip() for line in f if line.strip()]
@@ -64,7 +117,12 @@ def main():
         print(f"[-] 错误: 找不到文件 '{dict_path}'")
         sys.exit(1)
 
-    # 4. 开始扫描逻辑
+    headers = {"User-Agent": args.ua}
+
+    # --- 获取404指纹 ---
+    print(f"[*] 正在识别目标 404 特征...")
+    get_404_fingerprint(target_url, headers, args.timeout)
+
     print("\n" + "="*60)
     print(f" 目标: {target_url}")
     print(f" 字典: {dict_path} ({len(paths)} 行)")
@@ -72,7 +130,6 @@ def main():
     print("="*60 + "\n")
 
     results = []
-    headers = {"User-Agent": args.ua}
 
     try:
         with ThreadPoolExecutor(max_workers=args.threads) as executor:
@@ -88,7 +145,6 @@ def main():
     except KeyboardInterrupt:
         print("\n[!] 用户中断扫描。")
 
-    # 5. 结果保存
     if args.output and results:
         with open(args.output, "w", encoding="utf-8") as f:
             for item in results:
